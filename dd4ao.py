@@ -2,10 +2,12 @@ import numpy as np
 import cvxpy as cp
 import control as ct
 from scipy import signal
-from utils import *
+from dd_utils import *
 import time
-class dd4ao:
-    def __init__(self, W, plant, disturbance, order, bandwidth, fs, overshoot_weight = 0.01, Fx=np.array([1]), Fy=np.array([1,-1]), radius=1, n_iter = 1000, tol = 1e-4):
+
+class DD4AO:
+    def __init__(self, W, plant, disturbance, order, bandwidth, fs, overshoot_weight = 0.001, Fx=np.array([1]), Fy=np.array([1,-0.99]), radius=1, n_iter = 1000, tol = 1e-4):
+        self.K = None
         if W.ndim == 1:
             W = W[:, np.newaxis]
         if plant.ndim == 1:
@@ -13,9 +15,8 @@ class dd4ao:
         if disturbance.ndim == 1:
             disturbance = disturbance[:, np.newaxis]
         self.W = W
-        self.W_norm = W/fs
         self.plant = plant
-
+        self.W_norm = self.W/fs
         self.order = order
         self.bandwidth = bandwidth
         val = np.interp(bandwidth*2*np.pi, W.squeeze(), disturbance.squeeze())
@@ -34,14 +35,13 @@ class dd4ao:
         den, _ = signal.deconvolve(den, self.Fy)
         self.num = num[:, np.newaxis]
         self.den = den[:, np.newaxis]
-
         self.radius = radius
-
         self.n_iter = n_iter
         self.tol = tol
         self.obj_prev = np.inf
-        W2 = cp.multiply(freqresp(ct.tf(overshoot_weight,1,1/fs), W),plant.flatten())
+        W2 = np.multiply(freqresp(ct.tf(overshoot_weight,1,1/fs), W),plant.flatten())
         self.W2 = W2[:, np.newaxis]
+
     def robust_nyquist(self,P,Pc):
         if np.abs(self.W[0]) < 1e-4:
             Pc_start = np.conj(Pc[1])
@@ -91,9 +91,8 @@ class dd4ao:
         else:
             Y_n = np.ones((1,1))
         XY_n = cp.vstack([X_n, Y_n])
-
-        z = ct.tf('z')
-        z_ = freqresp(z, self.W_norm)
+        z = ct.tf([1,0],1,1/self.fs)
+        z_ = freqresp(z, self.W)
         Zy = np.power.outer(z_, np.arange(szy-1, -1, -1))
         Zx = np.power.outer(z_, np.arange(szx-1, -1, -1))
         Fx = freqresp(ct.tf(self.Fx, 1, self.Ts), self.W)
@@ -125,14 +124,11 @@ class dd4ao:
         PHI = 2*cp.real(cp.multiply(cp.hstack([cp.multiply(self.plant, ZFx), ZFy]), np.conj(Pc))) @ XY_n - np.abs(Pc) ** 2
         CON = rcone(PHI, gam_2, F_a)
         CON += rcone(PHI, gam_inf, F_b)
-        CON += [cp.sum(cp.multiply(integ[:,np.newaxis],gam_2)) <= obj_2, obj_2 >= 0]
+        CON += [cp.sum(cp.multiply(integ[:,np.newaxis],gam_2)) <= obj_2, obj_2 >= 0, gam_inf >= 0]
         CON += self.robust_nyquist(P, Pc)
         CON += self.con_radius(z_, szy, Y_c, Y_n)
-        # prob = cp.Problem(cp.Minimize(obj_2+obj_inf), CON)
-        prob = cp.Problem(cp.Minimize(obj_2), CON)
-        # prob.solve(solver=cp.CLARABEL, verbose = False)
-        prob.solve()
-        # print('obj = {:.2f}'.format(obj_2.value[0]))
+        prob = cp.Problem(cp.Minimize(obj_2+obj_inf), CON)
+        prob.solve(solver=cp.CLARABEL, verbose = False, tol_gap_abs = 1e-4, tol_gap_rel = 1e-4, tol_feas = 1e-4)
         self.num = X_n.value
         if isinstance(Y_n, np.ndarray): # happens if controller order is 1
             self.den = Y_n
@@ -140,24 +136,26 @@ class dd4ao:
             self.den = Y_n.value
         return obj_2.value[0]
 
-    def compute_controler(self):
-        t_start = time.time()
+    def compute_controller(self, verbose = False):
+        # t_start = time.time()
         for i in range(self.n_iter):
             obj = self.solve_iter()
             if np.abs(self.obj_prev-obj) < self.tol:
                 break
-            print('iter {} obj = {:.5f} diff = {:.5f}'.format(i,obj,np.abs(self.obj_prev - obj)))
+            if verbose:
+                print('iter {} obj = {:.5f} diff = {:.5f}'.format(i,obj,np.abs(self.obj_prev - obj)))
             self.obj_prev = obj
 
-        K_num = signal.convolve(self.num.squeeze(), self.Fx)
+        self.num = signal.convolve(self.num.squeeze(), self.Fx)
         if self.den.squeeze().ndim == 0:
-            K_den = self.Fy
+            self.den = self.Fy
         else:
-            K_den = signal.convolve(self.den.squeeze(), self.Fy)
-        K = ct.tf(K_num, K_den, self.Ts)
-        elapsed_time = time.time() - t_start
-        print('time elapsed = {:.2f} s'.format(elapsed_time))
-        return K
+            self.den = signal.convolve(self.den.squeeze(), self.Fy)
+        self.K = ct.tf(self.num, self.den, self.Ts)
+
+        # elapsed_time = time.time() - t_start
+        # print('time elapsed = {:.2f} s'.format(elapsed_time))
+        return 1
 
 
 
