@@ -2,31 +2,46 @@ import numpy as np
 import control as ct
 import cvxpy as cp
 from matplotlib import pyplot as plt
+from scipy import signal
 
+def compute_frequency_response(input_signal, output_signal, sampling_time):
+    R_f = np.fft.fft(input_signal)
+    Y_f = np.fft.fft(output_signal)
+    H_f = Y_f / R_f
+    N = len(input_signal)
+    freq = np.fft.fftfreq(N, sampling_time)[:N//2]
+    H_f = H_f[:N//2]
+    return freq, H_f
 
 def freqresp(sys, w):
     return ct.frequency_response(sys,w.squeeze()).fresp.squeeze()
 
 def rcone(x,y,z):
-    rcone_con = cp.SOC((x + y).flatten(), cp.hstack([2 * z, x - y]).T)
+    rcone_con = cp.SOC((x + y).flatten(order = 'C'), cp.hstack([2 * z, x - y]).T)
     rcone_con =  [rcone_con,x >= 0, y >= 0]
     return rcone_con
 
 def logspace(start,stop,num):
     return np.logspace(np.log10(start),np.log10(stop),num)
 
-def interp_log(w,psd,num):
+def interp_log(w,psd,n):
     if w[0] == 0:
-        w_log = logspace(w[1],w[-1],num)
+        w_log = logspace(w[1],w[-1]-1e-10,n)
     else:
-        w_log = logspace(w[0],w[-1],num)
+        w_log = logspace(w[0],w[-1]-1e-10,n)
     psd_log = np.interp(w_log,w,psd)
     return w_log, psd_log
 
 def G_tf(delay, fs):
-    dummy = np.zeros(delay+1)
-    dummy[0] = 1
-    return ct.tf(np.array([1]),dummy,1/fs)
+    delay_ceil = int(np.ceil(delay))
+    delay_frac,_ = np.modf(delay)
+    den = np.zeros(delay_ceil+1)
+    den[0] = 1
+    if delay_frac != 0.:
+        num = np.array([1-delay_frac,delay_frac])
+    else:
+        num = np.array([1])
+    return ct.tf(num,den,1/fs)
 
 def G_freq_resp(delay,w,fs):
     phase_shift = -w * delay / fs
@@ -40,9 +55,11 @@ def check_K_stability(K,G):
 def evaluate_K_performance(K,G,dist,fs):
     T = dist.shape[0]/fs
     t = np.arange(0,T,1/fs)
-    sys = ct.feedback(1, G * K)
-    res = ct.forced_response(sys,t,dist.squeeze())
-    return res.outputs
+    sys_e = ct.feedback(1, G * K)
+    sys_u = ct.feedback(G * K, 1)
+    res = ct.forced_response(sys_e,t,dist.squeeze())
+    command = ct.forced_response(sys_u, t, dist.squeeze())
+    return res.outputs[100:], command.outputs[100:]
 
 def theoretical_best_perf(dist_psd):
     length = np.max(dist_psd.shape)
@@ -59,7 +76,6 @@ def get_normal_direction(r):
     n = n/np.abs(n)
     n = n*np.sign(np.real(np.conj(n)*r[0:-1]))
     return n
-
 
 def compute_fft_mag_welch(data, fft_size, fs):
     if data.ndim == 1:
@@ -81,7 +97,7 @@ def compute_fft_mag_welch(data, fft_size, fs):
             data_w = data[start_idx:start_idx + window_size, mode]
             data_w = data_w * window
             fft_result = np.fft.rfft(data_w)
-            psd_w = (np.abs(fft_result) / fft_size) ** 2
+            psd_w = (np.abs(fft_result)) ** 2 / (fft_size * np.mean(window ** 2))
             psd_w[1:-1] *= 2  # Double non-DC, non-Nyquist components
             spectrogram[:, i, mode] = psd_w
 
@@ -90,6 +106,7 @@ def compute_fft_mag_welch(data, fft_size, fs):
     f = np.linspace(0, fs / 2, fft_size // 2 + 1)
 
     return magnitude_spectrum, f, spectrogram
+
 
 def plot_sensitivity(ax,G, K, K0, dist_psd, f, bandwidth):
     if f[0] == 0:
@@ -103,13 +120,13 @@ def plot_sensitivity(ax,G, K, K0, dist_psd, f, bandwidth):
     K0_cl_freqresp = np.abs(freqresp(K0_cl, f*2*np.pi))
     K_cl_freqresp = np.abs(freqresp(K_cl, f*2*np.pi))
 
-    ax.semilogx(f,20*np.log10(K0_cl_freqresp))
-    ax.semilogx(f, 20 * np.log10(K_cl_freqresp))
-    ax.semilogx(f, 20 * np.log10(1/dist_psd))
+    ax.loglog(f,K0_cl_freqresp)
+    ax.loglog(f,K_cl_freqresp)
+    ax.loglog(f,1/dist_psd)
     ax.legend(('integrator', 'datadriven', 'disturbance^-1'))
     ax.set_title('sensitivity function')
     ax.set_xlabel("frequency [Hz]")
-    ax.set_ylabel("magnitude [dB]")
+    ax.set_ylabel("magnitude")
     ax.grid()
     return
 
@@ -121,12 +138,12 @@ def plot_comp_sensitivity(ax,G, K, K0,f):
     K0_cl_freqresp = np.abs(freqresp(K0_cl, f*2*np.pi))
     K_cl_freqresp = np.abs(freqresp(K_cl, f*2*np.pi))
 
-    ax.semilogx(f,20*np.log10(K0_cl_freqresp))
-    ax.semilogx(f, 20 * np.log10(K_cl_freqresp))
+    ax.loglog(f,K0_cl_freqresp)
+    ax.loglog(f,K_cl_freqresp)
     ax.legend(('integrator', 'datadriven'))
     ax.set_title('complementary sensitivity function')
     ax.set_xlabel("frequency [Hz]")
-    ax.set_ylabel("magnitude [dB]")
+    ax.set_ylabel("magnitude")
     ax.grid()
     return
 
@@ -134,14 +151,22 @@ def plot_res_psd(ax,res_K0, res_K, fft_size, fs):
     res_K0_psd, f, _ = compute_fft_mag_welch(res_K0, fft_size, fs)
     res_K_psd, _, _ = compute_fft_mag_welch(res_K, fft_size, fs)
 
-    ax.semilogx(f,20*np.log10(res_K0_psd))
-    ax.semilogx(f, 20 * np.log10(res_K_psd))
+    ax.loglog(f,res_K0_psd)
+    ax.loglog(f,res_K_psd)
     ax.set_title('residual PSD')
     ax.legend(('integrator','datadriven'))
     ax.set_xlabel("frequency [Hz]")
-    ax.set_ylabel("magnitude [dB]")
+    ax.set_ylabel("magnitude")
     ax.grid()
 
+def plot_psd(x, fft_size, fs, title = 'signal PSD'):
+    x_psd, f, _ = compute_fft_mag_welch(x, fft_size, fs)
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+    ax.loglog(f,np.x_psd)
+    ax.set_title(title)
+    ax.set_xlabel("frequency [Hz]")
+    ax.set_ylabel("magnitude")
+    ax.grid()
 
 def plot_combined(G, K, K0, dist_psd, f, res_K0, res_K, fft_size, fs, mode_n, bandwidth):
     fig, axs = plt.subplots(3, 1, figsize=(8, 12))  # 3 subplots stacked vertically
@@ -164,5 +189,8 @@ def pol_reconstruct(command, measurement, delay):
     delay_floor = int(np.floor(delay))
     delay_ceil = int(np.ceil(delay))
     delay_frac,_ = np.modf(delay)
-    pol = measurement[delay_ceil:,:] + (1 - delay_frac) * command[1:-delay_floor,:] + delay_frac * command[:-delay_ceil,:]
+    if delay_ceil == delay_floor:
+        pol = measurement[delay_ceil:, :] + command[:-delay_ceil,:]
+    else:
+        pol = measurement[delay_ceil:, :] + (1 - delay_frac) * command[1:-delay_floor, :] + delay_frac * command[:-delay_ceil,:]
     return pol
