@@ -6,9 +6,10 @@ from dd_utils import *
 import dd4ao
 
 
-fs = 500 #Hz
-n_fft = 300
-delay = 2 #frames
+fs = 500 # Hz loop frequency
+order = 10 # order of the controller (horizon)
+n_fft = 300 # number of fft bins for optimization 
+delay = 1.2 # frames /!\ minimum is one (discrete time), can be fractional
 
 dist = pfits.getdata('disturbance_test.fits')
 t = np.arange(0,dist.shape[0]/fs,1/fs)
@@ -21,14 +22,12 @@ plt.title('time domain disturbance')
 dist_fft,f, _  = compute_fft_mag_welch(dist,n_fft,fs)
 w = 2*np.pi*f
 
-order = 15
-bandwidth = 10 #[Hz]
 
-G = G_tf(2, fs)
-G_resp = freqresp(G, w)
+G = G_tf(delay, fs) # system transfer function, pure delaz
+G_resp = freqresp(G, w) # system frequency response
 
 
-dd = dd4ao.DD4AO(w, G_resp, dist_fft, order, bandwidth, fs)
+dd = dd4ao.DD4AO(w, G_resp, dist_fft, order, fs)
 
 dd.compute_controller(verbose = True)
 K = dd.K
@@ -49,7 +48,7 @@ theoretical_best = theoretical_best_perf(dist_fft/f[1])
 
 print('int PSD integral = {:.2f}, dd PSD integral = {:.2f}, theoretical best = {:.2f}'.format(np.sum(res_K0_psd)/f[1],np.sum(res_K_psd)/f[1],theoretical_best))
 
-
+bandwidth = 10 # Hz
 plot_combined(G, K, K0, dist_fft, f, res_K0, res_K, n_fft, fs,0, bandwidth)
 plt.show()
 

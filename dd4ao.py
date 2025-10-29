@@ -6,9 +6,9 @@ from dd_utils import *
 import time
 
 class DD4AO:
-    def __init__(self, w, G_resp, disturbance, order, bandwidth, fs, K0_num = np.array([0.2, 0]),
-                 K0_den = np.array([1,-0.99]), Fx=np.array([1]), Fy=np.array([1, -0.99]),
-                 overshoot_weight = 0., radius=1, n_iter = 1000, tol = 1e-4):
+    def __init__(self, w, G_resp, disturbance, order, fs, K0_num = np.array([0.2, 0]),
+                 K0_den = np.array([1,-0.99]), gain_margin = 1, Fx=np.array([1]), Fy=np.array([1, -0.99]),
+                 overshoot_weight = 0., radius=1, n_iter = 1000, tol = 1e-3):
 
         self.K = None
         self.S_resp = None
@@ -28,12 +28,10 @@ class DD4AO:
             disturbance = disturbance[:, np.newaxis]
 
         self.w = w
-        self.G_resp = G_resp
+        self.G_resp = G_resp*gain_margin
         self.W_norm = self.w / fs
         self.order = order
-        self.bandwidth = bandwidth
-        val = np.interp(bandwidth * 2 * np.pi, w.squeeze(), disturbance.squeeze())
-        self.disturbance = disturbance/val
+        self.disturbance = disturbance/disturbance[-1,0] # normalize
         self.fs = fs
         self.Ts = 1/fs
         self.Fx = Fx
