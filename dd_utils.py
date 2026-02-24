@@ -104,7 +104,7 @@ def compute_fft_mag_welch(data, fft_size, fs):
     avg_psd = np.mean(spectrogram, axis=1).squeeze()
     magnitude_spectrum = np.sqrt(avg_psd)
     f = np.linspace(0, fs / 2, fft_size // 2 + 1)
-
+    f[-1] *= 0.9999 # avoid nyquist warnings
     return magnitude_spectrum, f, spectrogram
 
 
@@ -123,7 +123,7 @@ def plot_sensitivity(ax,G, K, K0, dist_psd, f, bandwidth):
     ax.loglog(f,K0_cl_freqresp)
     ax.loglog(f,K_cl_freqresp)
     ax.loglog(f,1/dist_psd)
-    ax.legend(('integrator', 'datadriven', 'disturbance^-1'))
+    ax.legend(('integrator', 'DD4AO', 'disturbance^-1'))
     ax.set_title('sensitivity function')
     ax.set_xlabel("frequency [Hz]")
     ax.set_ylabel("magnitude")
@@ -140,7 +140,7 @@ def plot_comp_sensitivity(ax,G, K, K0,f):
 
     ax.loglog(f,K0_cl_freqresp)
     ax.loglog(f,K_cl_freqresp)
-    ax.legend(('integrator', 'datadriven'))
+    ax.legend(('integrator', 'DD4AO'))
     ax.set_title('complementary sensitivity function')
     ax.set_xlabel("frequency [Hz]")
     ax.set_ylabel("magnitude")
@@ -154,7 +154,7 @@ def plot_res_psd(ax,res_K0, res_K, fft_size, fs):
     ax.loglog(f,res_K0_psd)
     ax.loglog(f,res_K_psd)
     ax.set_title('residual PSD')
-    ax.legend(('integrator','datadriven'))
+    ax.legend(('integrator','DD4AO'))
     ax.set_xlabel("frequency [Hz]")
     ax.set_ylabel("magnitude")
     ax.grid()
