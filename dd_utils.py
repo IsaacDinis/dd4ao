@@ -12,14 +12,13 @@ def compute_frequency_response(input_signal, output_signal, sampling_time):
     freq = np.fft.fftfreq(N, sampling_time)[:N//2]
     H_f = H_f[:N//2]
     return freq, H_f
+    
+def sigmoid_array(size, index, lambda_ = 1):
+    x = np.arange(size)
+    return 1 / (1 + np.exp(-lambda_ * (x - index)))
 
 def freqresp(sys, w):
     return ct.frequency_response(sys,w.squeeze()).fresp.squeeze()
-
-def rcone(x,y,z):
-    rcone_con = cp.SOC((x + y).flatten(order = 'C'), cp.hstack([2 * z, x - y]).T)
-    rcone_con =  [rcone_con,x >= 0, y >= 0]
-    return rcone_con
 
 def logspace(start,stop,num):
     return np.logspace(np.log10(start),np.log10(stop),num)
@@ -65,17 +64,6 @@ def theoretical_best_perf(dist_psd):
     length = np.max(dist_psd.shape)
     return 10**(np.sum(np.log10(dist_psd))/length)*length
 
-def get_normal_direction(r):
-    n = 1j*np.diff(r, axis = 0)
-    for i in range(len(n)):
-        if n[i] == 0:
-            n[i] = r[i]
-        elif np.imag(np.conj(n[i])*r[i])*np.imag(np.conj(n[i])*r[i+1]) > 0:
-            idx = np.argmin(np.abs(r[i:i+1]))
-            n[i] = r[i+idx]
-    n = n/np.abs(n)
-    n = n*np.sign(np.real(np.conj(n)*r[0:-1]))
-    return n
 
 def compute_fft_mag_welch(data, fft_size, fs):
     if data.ndim == 1:

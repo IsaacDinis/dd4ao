@@ -2,8 +2,9 @@ import astropy.io.fits as pfits
 import numpy as np
 import control as ct
 from matplotlib import pyplot as plt
-from dd_utils import *
 import dd4ao
+from dd_utils import *
+
 
 
 fs = 500 # Hz loop frequency

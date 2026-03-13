@@ -1,3 +1,12 @@
+"""
+DD4AO  convex code
+
+Author : Isaac Dinis
+Email  : isaac.dinis@unige.ch
+Date   : 2026-03-06
+"""
+
+
 import numpy as np
 import cvxpy as cp
 import control as ct
@@ -7,15 +16,15 @@ import time
 
 
 class DD4AO:
-    def __init__(self, w, G_resp, disturbance, order, fs, K0_num=np.array([0.2, 0]),
+    def __init__(self, w, G_freq, disturbance, order, fs, K0_num=np.array([0.2, 0]),
                  K0_den=np.array([1, -0.99]), Fx=np.array([1]), Fy=np.array([1, -0.99]),
                  n_iter=10, tol=1e-3, high_freq_u_lim=False):
 
         self.K = None
-        self.S_resp = None
-        self.T_resp = None
-        self.GK_resp = None
-        self.K_resp = None
+        self.S_freq = None
+        self.T_freq = None
+        self.GK_freq = None
+        self.K_freq = None
         self.gm = None
         self.pm = None
         self.wcg = None
@@ -23,13 +32,13 @@ class DD4AO:
 
         if w.ndim == 1:
             w = w[:, np.newaxis]
-        if G_resp.ndim == 1:
-            G_resp = G_resp[:, np.newaxis]
+        if G_freq.ndim == 1:
+            G_freq = G_freq[:, np.newaxis]
         if disturbance.ndim == 1:
             disturbance = disturbance[:, np.newaxis]
 
         self.w = w
-        self.G_resp = G_resp
+        self.G_freq = G_freq
         self.W_norm = self.w / fs
         self.order = order
         bandwidth = fs/4
@@ -59,10 +68,10 @@ class DD4AO:
         self.sigm_weight = 10
         self.sigm_lambda = 0.05
         sigm = sigmoid_array(w.shape[0],w.shape[0]-1, self.sigm_lambda) * self.sigm_weight
-        W2 = np.multiply(sigm, G_resp.flatten())
+        W2 = np.multiply(sigm, G_freq.flatten())
 
         self.W2 = W2[:, np.newaxis]
-        # self.W2 = sigm[:, np.newaxis]
+
     def robust_nyquist(self, P, Pc):
         if np.abs(self.w[0]) < 1e-4:
             Pc_start = np.conj(Pc[1])
@@ -78,7 +87,7 @@ class DD4AO:
             P_end = cp.reshape(cp.conj(P[-1]), (1, 1), order='C')
         Pc_ = np.vstack((Pc_start, Pc, Pc_end))
         Cp2 = cp.vstack([P_start, P, P_end])
-        n = get_normal_direction(Pc_)
+        n = self.get_normal_direction(Pc_)
         polygonalP1 = 2 * cp.real(cp.multiply(np.conj(n), Cp2[:-1]))
         polygonalP2 = 2 * cp.real(cp.multiply(np.conj(n), Cp2[1:]))
         return [polygonalP1 >= 1e-5, polygonalP2 >= 1e-5]
@@ -93,7 +102,7 @@ class DD4AO:
         if Zys_.ndim == 1:  # happens if controller order is 1
             Zys_ = Zys_[:, np.newaxis]
         Ycs_ = Zys_ @ Y_c
-        n = get_normal_direction(Ycs_)
+        n = self.get_normal_direction(Ycs_)
         polygonalY1 = 2 * cp.real(cp.multiply(np.conj(n), Zys_[:-1] @ Y_n))
         polygonalY2 = 2 * cp.real(cp.multiply(np.conj(n), Zys_[1:] @ Y_n))
         return [polygonalY1 >= 1e-5, polygonalY2 >= 1e-5]
@@ -142,15 +151,15 @@ class DD4AO:
         F_a = cp.multiply(self.disturbance, Yf)
         if self.high_freq_u_lim:
             F_b = cp.multiply(self.W2, Xf)
-        Pc = self.G_resp * Xc + Yc
-        P = cp.multiply(self.G_resp, Xf) + Yf
+        Pc = self.G_freq * Xc + Yc
+        P = cp.multiply(self.G_freq, Xf) + Yf
 
-        PHI = 2 * cp.real(cp.multiply(cp.hstack([cp.multiply(self.G_resp, ZFx), ZFy]), np.conj(Pc))) @ XY_n - np.abs(
+        PHI = 2 * cp.real(cp.multiply(cp.hstack([cp.multiply(self.G_freq, ZFx), ZFy]), np.conj(Pc))) @ XY_n - np.abs(
             Pc) ** 2
-        CON = rcone(PHI, gam_2, F_a)
+        CON = self.rcone(PHI, gam_2, F_a)
 
         if self.high_freq_u_lim:
-            CON += rcone(PHI, gam_inf, F_b)
+            CON += self.rcone(PHI, gam_inf, F_b)
             CON += [cp.sum(cp.multiply(integ[:, np.newaxis], gam_2)) <= obj_2, obj_2 >= 0, gam_inf >= 0]
         else:
             CON += [cp.sum(cp.multiply(integ[:, np.newaxis], gam_2)) <= obj_2, obj_2 >= 0]
@@ -168,10 +177,21 @@ class DD4AO:
             print("Solver failed:", e)
             return -1
 
+
+        if isinstance(Y_n, np.ndarray):  # happens if controller order is 1
+            K_temp,_,_ = self.get_K(X_n.value,Y_n)
+        else:
+            K_temp,_,_ = self.get_K(X_n.value,Y_n.value)
+
+        stable = self.check_nyquist_stability(K_temp)
+        if not stable:
+            print("Controller unstable stopping iterations")
+            return -1
         if verbose:
             print('obj = {:.2f}'.format(obj_2.value[0]))
             if self.high_freq_u_lim:
                 print('obj_inf = {:.5f}'.format(obj_inf.value[0][0]))
+
         self.num = X_n.value
         if isinstance(Y_n, np.ndarray):  # happens if controller order is 1
             self.den = Y_n
@@ -182,6 +202,7 @@ class DD4AO:
     def compute_controller(self, verbose=False):
         t_start = time.perf_counter()
         for i in range(self.n_iter):
+            # print(i)
             obj = self.solve_iter(verbose)
             if np.abs(self.obj_prev - obj) < self.tol or obj == -1:
                 break
@@ -189,27 +210,78 @@ class DD4AO:
                 print('iter {} obj = {:.5f} diff = {:.5f}'.format(i, obj, np.abs(self.obj_prev - obj)))
             self.obj_prev = obj
 
-        if self.num.squeeze().ndim == 0:
-            self.num = signal.convolve(np.reshape(self.num, (1)), self.Fx)
-        else:
-            self.num = signal.convolve(self.num.squeeze(), self.Fx)
 
-        if self.den.squeeze().ndim == 0:
-            self.den = signal.convolve(np.reshape(self.den, (1)), self.Fy)
-        else:
-            self.den = signal.convolve(self.den.squeeze(), self.Fy)
+        self.K,self.num,self.den = self.get_K(self.num,self.den)
+        self.K_freq = freqresp(self.K, self.w)
+        self.K_freq = self.K_freq[:, np.newaxis]
+        self.GK_freq = self.K_freq * self.G_freq
+        self.S_freq = 1 / (1 + self.GK_freq)
+        self.T_freq = self.GK_freq / (1 + self.GK_freq)
 
-        self.K = ct.tf(self.num, self.den, self.Ts)
-
-        self.K_resp = freqresp(self.K, self.w)
-        self.K_resp = self.K_resp[:, np.newaxis]
-        self.GK_resp = self.K_resp * self.G_resp
-        self.S_resp = 1 / (1 + self.GK_resp)
-        self.T_resp = self.GK_resp / (1 + self.GK_resp)
-
-        self.gm, self.pm, self.wcg, self.wcp = ct.margin(np.abs(self.GK_resp).squeeze(),np.angle(self.GK_resp, deg=True).squeeze(),self.w.squeeze())
+        self.gm, self.pm, self.wcg, self.wcp = ct.margin(np.abs(self.GK_freq).squeeze(),np.angle(self.GK_freq, deg=True).squeeze(),self.w.squeeze())
         elapsed_time = time.perf_counter() - t_start
 
         if verbose:
             print('time elapsed = {:.2f} s'.format(elapsed_time))
         return 1
+
+    def get_K(self, num, den): # convolves num and den with fixed part and returns K transfer function
+
+        if num.squeeze().ndim == 0:
+            num = signal.convolve(np.reshape(num, (1)), self.Fx)
+        else:
+            num = signal.convolve(num.squeeze(), self.Fx)
+
+        if den.squeeze().ndim == 0:
+            den = signal.convolve(np.reshape(den, (1)), self.Fy)
+        else:
+            den = signal.convolve(den.squeeze(), self.Fy)
+
+        return ct.tf(num, den, self.Ts), num, den
+
+    def check_nyquist_stability(self, K):
+        
+        poles = np.roots(K.num[0][0])
+        P = np.sum(np.abs(poles) > 1)
+        K_freq = freqresp(K, self.w)
+        K_freq = K_freq[:, np.newaxis]
+        GK_freq = K_freq * self.G_freq
+        S_freq = 1 / (1 + GK_freq)
+        S_full = np.concatenate([np.conj(S_freq[::-1]),S_freq])
+        T = 1 / S_full
+
+        # Phase tracking for encirclement of origin
+        phase = np.angle(T.ravel())
+        phase_unwrapped = np.unwrap(phase)
+        self.phase = phase
+        total_phase_change = phase_unwrapped[-1] - phase_unwrapped[0]
+       
+        # Clockwise encirclements of origin
+        N = -total_phase_change / (2 * np.pi)
+
+        # Closed-loop RHP poles
+        Z = N + P
+        stable =  Z < 1e-2
+
+        return stable
+
+    def rcone(self,x,y,z):
+        # rcone_con = [
+        #     cp.SOC(x[i] + y[i], cp.vstack([2 * z[i], x[i] - y[i]])) for i in range(x.shape[0])
+        # ]
+        rcone_con = cp.SOC((x + y).flatten(order = 'C'), cp.hstack([2 * z, x - y]).T)
+        rcone_con =  [rcone_con,x >= 0, y >= 0]
+        return rcone_con
+
+
+    def get_normal_direction(self,r):
+        n = 1j*np.diff(r, axis = 0)
+        for i in range(len(n)):
+            if n[i] == 0:
+                n[i] = r[i]
+            elif np.imag(np.conj(n[i])*r[i])*np.imag(np.conj(n[i])*r[i+1]) > 0:
+                idx = np.argmin(np.abs(r[i:i+1]))
+                n[i] = r[i+idx]
+        n = n/np.abs(n)
+        n = n*np.sign(np.real(np.conj(n)*r[0:-1]))
+        return n
