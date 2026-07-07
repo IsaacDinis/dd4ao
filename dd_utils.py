@@ -18,7 +18,7 @@ def sigmoid_array(size, index, lambda_ = 1):
     return 1 / (1 + np.exp(-lambda_ * (x - index)))
 
 def freqresp(sys, w):
-    return ct.frequency_response(sys,w.squeeze()).fresp.squeeze()
+    return ct.frequency_response(sys,w.squeeze()).frdata.squeeze()
 
 def logspace(start,stop,num):
     return np.logspace(np.log10(start),np.log10(stop),num)
