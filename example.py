@@ -14,8 +14,7 @@ import numpy as np
 import control as ct
 from matplotlib import pyplot as plt
 
-# import dd4ao
-import dd4ao_ddp as dd4ao
+import dd4ao
 from dd_utils import *  # compute_fft_mag_welch, G_tf, freqresp, check_K_stability,
                          # evaluate_K_performance, theoretical_best_perf, plot_combined
 
@@ -69,7 +68,8 @@ print(
 # -----------------------------------------------------------------------
 # Baseline controller: simple integrator, for comparison
 # -----------------------------------------------------------------------
-K0 = ct.tf(np.array([0.5, 0]), np.array([1, -1]), 1 / fs)
+gain = 0.5
+K0 = ct.tf(np.array([gain, 0]), np.array([1, -1]), 1 / fs)
 
 # -----------------------------------------------------------------------
 # Closed-loop performance evaluation (time domain)

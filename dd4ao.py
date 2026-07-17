@@ -72,135 +72,163 @@ class DD4AO:
 
         self.W2 = W2[:, np.newaxis]
 
-    def robust_nyquist(self, P, Pc):
+    def build_problem(self):
+        szx = self.num.shape[0]
+        szy = self.den.shape[0]
+
+        # --- Parameters: current controller (updated every iteration) ---
+        self.X_c = cp.Parameter((szx, 1))
+        self.Y_c = cp.Parameter((szy, 1))
+        self.X_c.value = self.num
+        self.Y_c.value = self.den
+
+        # --- Decision variables: next controller ---
+        self.X_n = cp.Variable((szx, 1))
+        if szy > 1:
+            self.Y_n = cp.vstack([np.ones((1, 1)), cp.Variable((szy - 1, 1))])
+        else:
+            self.Y_n = np.ones((1, 1))
+        XY_n = cp.vstack([self.X_n, self.Y_n])
+
+        z = ct.tf([1, 0], 1, 1 / self.fs)
+        z_ = freqresp(z, self.w)
+        Zy = np.power.outer(z_, np.arange(szy - 1, -1, -1))
+        Zx = np.power.outer(z_, np.arange(szx - 1, -1, -1))
+        Fx = freqresp(ct.tf(self.Fx, 1, self.Ts), self.w)[:, np.newaxis]
+        Fy = freqresp(ct.tf(self.Fy, 1, self.Ts), self.w)[:, np.newaxis]
+
+        Ycs = Zy @ self.Y_c
+        Xcs = Zx @ self.X_c
+        Yc = cp.multiply(Ycs, Fy)
+        Xc = cp.multiply(Xcs, Fx)
+        ZFy = Zy * Fy
+        ZFx = Zx * Fx
+        Yf = ZFy @ self.Y_n
+        Xf = ZFx @ self.X_n
+
+        self.obj_2 = cp.Variable(1)
+        gam_2 = cp.Variable((self.w.shape[0], 1))
+
+        if self.high_freq_u_lim:
+            self.obj_inf = cp.Variable((1, 1))
+            gam_inf = cp.multiply(self.obj_inf, np.ones((self.w.shape[0], 1)))
+
+        integ = 1 / (self.fs * 2 * np.pi) * (
+            np.append(np.diff(self.w.squeeze()), 0) + np.insert(np.diff(self.w.squeeze()), 0, 2 * self.w[0]))
+
+        F_a = cp.multiply(self.disturbance, Yf)
+        if self.high_freq_u_lim:
+            F_b = cp.multiply(self.W2, Xf)
+
+        self.Pc_expr = cp.multiply(self.G_freq, Xc) + Yc
+        P = cp.multiply(self.G_freq, Xf) + Yf
+
+        self.Pc_abs2 = cp.Parameter((self.w.shape[0], 1), nonneg=True)
+
+        PHI = 2 * cp.real(cp.multiply(cp.hstack([cp.multiply(self.G_freq, ZFx), ZFy]),
+                                       cp.conj(self.Pc_expr))) @ XY_n - self.Pc_abs2
+        CON = self.rcone(PHI, gam_2, F_a)
+
+        if self.high_freq_u_lim:
+            CON += self.rcone(PHI, gam_inf, F_b)
+            CON += [cp.sum(cp.multiply(integ[:, np.newaxis], gam_2)) <= self.obj_2, self.obj_2 >= 0, gam_inf >= 0]
+        else:
+            CON += [cp.sum(cp.multiply(integ[:, np.newaxis], gam_2)) <= self.obj_2, self.obj_2 >= 0]
+
+        nyquist_con = self._build_robust_nyquist(P)
+        radius_con = self._build_con_radius(z_, szy, self.Y_n)
+        CON += nyquist_con
+        CON += radius_con
+
+        if self.high_freq_u_lim:
+            self.prob = cp.Problem(cp.Minimize(self.obj_2 + self.obj_inf), CON)
+        else:
+            self.prob = cp.Problem(cp.Minimize(self.obj_2), CON)
+
+
+    def _build_robust_nyquist(self, P):
+        Pc = self.Pc_expr
         if np.abs(self.w[0]) < 1e-4:
-            Pc_start = np.conj(Pc[1])
+            Pc_start = cp.reshape(cp.conj(Pc[1]), (1, 1), order='C')
             P_start = cp.reshape(cp.conj(P[1]), (1, 1), order='C')
         else:
-            Pc_start = np.conj(Pc[0])
+            Pc_start = cp.reshape(cp.conj(Pc[0]), (1, 1), order='C')
             P_start = cp.reshape(cp.conj(P[0]), (1, 1), order='C')
         if np.abs(self.w[-1] - np.pi * self.fs) < 1e-4:
-            Pc_end = np.conj(Pc[-2])
+            Pc_end = cp.reshape(cp.conj(Pc[-2]), (1, 1), order='C')
             P_end = cp.reshape(cp.conj(P[-2]), (1, 1), order='C')
         else:
-            Pc_end = np.conj(Pc[-1])
+            Pc_end = cp.reshape(cp.conj(Pc[-1]), (1, 1), order='C')
             P_end = cp.reshape(cp.conj(P[-1]), (1, 1), order='C')
-        Pc_ = np.vstack((Pc_start, Pc, Pc_end))
+
+        self.Pc_ext = cp.vstack((Pc_start, Pc, Pc_end))
         Cp2 = cp.vstack([P_start, P, P_end])
-        n = self.get_normal_direction(Pc_)
-        polygonalP1 = 2 * cp.real(cp.multiply(np.conj(n), Cp2[:-1]))
-        polygonalP2 = 2 * cp.real(cp.multiply(np.conj(n), Cp2[1:]))
+
+        self.n_nyquist = cp.Parameter((self.Pc_ext.shape[0] - 1, 1), complex=True)
+        polygonalP1 = 2 * cp.real(cp.multiply(cp.conj(self.n_nyquist), Cp2[:-1]))
+        polygonalP2 = 2 * cp.real(cp.multiply(cp.conj(self.n_nyquist), Cp2[1:]))
         return [polygonalP1 >= 1e-5, polygonalP2 >= 1e-5]
 
-    def con_radius(self, z_, szy, Y_c, Y_n):
+
+    def _build_con_radius(self, z_, szy, Y_n):
         if z_.ndim == 1:
             z_ = z_[:, np.newaxis]
         z_start = np.conj(z_[0])
         z_end = np.conj(z_[-1])
         z2 = np.vstack((z_start, z_, z_end))
         Zys_ = np.power.outer(z2 * self.radius, np.arange(szy - 1, -1, -1)).squeeze()
-        if Zys_.ndim == 1:  # happens if controller order is 1
+        if Zys_.ndim == 1:
             Zys_ = Zys_[:, np.newaxis]
-        Ycs_ = Zys_ @ Y_c
-        n = self.get_normal_direction(Ycs_)
-        polygonalY1 = 2 * cp.real(cp.multiply(np.conj(n), Zys_[:-1] @ Y_n))
-        polygonalY2 = 2 * cp.real(cp.multiply(np.conj(n), Zys_[1:] @ Y_n))
+        self.Zys_ = Zys_
+
+        self.n_radius = cp.Parameter((self.Zys_.shape[0] - 1, 1), complex=True)
+        polygonalY1 = 2 * cp.real(cp.multiply(cp.conj(self.n_radius), Zys_[:-1] @ Y_n))
+        polygonalY2 = 2 * cp.real(cp.multiply(cp.conj(self.n_radius), Zys_[1:] @ Y_n))
         return [polygonalY1 >= 1e-5, polygonalY2 >= 1e-5]
+
 
     def solve_iter(self, verbose):
 
-        X_c = self.num
-        Y_c = self.den
+        Pc_val = self.Pc_expr.value
+        self.Pc_abs2.value = np.abs(Pc_val) ** 2
+        self.n_nyquist.value = self.get_normal_direction(self.Pc_ext.value)
 
-        szx = X_c.shape[0]
-        szy = Y_c.shape[0]
+        Ycs_val = self.Zys_ @ self.Y_c.value
+        self.n_radius.value = self.get_normal_direction(Ycs_val)
 
-        X_n = cp.Variable((szx, 1))
-        if szy > 1:
-            Y_n = cp.vstack([np.ones((1, 1)), cp.Variable((szy - 1, 1))])
-        else:
-            Y_n = np.ones((1, 1))
-        XY_n = cp.vstack([X_n, Y_n])
-        z = ct.tf([1, 0], 1, 1 / self.fs)
-        z_ = freqresp(z, self.w)
-        Zy = np.power.outer(z_, np.arange(szy - 1, -1, -1))
-        Zx = np.power.outer(z_, np.arange(szx - 1, -1, -1))
-        Fx = freqresp(ct.tf(self.Fx, 1, self.Ts), self.w)
-        Fy = freqresp(ct.tf(self.Fy, 1, self.Ts), self.w)
-        Fx = Fx[:, np.newaxis]
-        Fy = Fy[:, np.newaxis]
-
-        Ycs = Zy @ Y_c
-        Xcs = Zx @ X_c
-        Yc = Ycs * Fy
-        Xc = Xcs * Fx
-        ZFy = Zy * Fy
-        ZFx = Zx * Fx
-        Yf = ZFy @ Y_n
-        Xf = ZFx @ X_n
-
-        obj_2 = cp.Variable(1)
-        gam_2 = cp.Variable(((self.w).shape[0], 1))
-
-        if self.high_freq_u_lim:
-            obj_inf = cp.Variable((1, 1))
-            gam_inf = cp.multiply(obj_inf, np.ones(((self.w).shape[0], 1)))
-
-        integ = 1 / (self.fs * 2 * np.pi) * (
-                    np.append(np.diff(self.w.squeeze()), 0) + np.insert(np.diff(self.w.squeeze()), 0, 2 * self.w[0]))
-        F_a = cp.multiply(self.disturbance, Yf)
-        if self.high_freq_u_lim:
-            F_b = cp.multiply(self.W2, Xf)
-        Pc = self.G_freq * Xc + Yc
-        P = cp.multiply(self.G_freq, Xf) + Yf
-
-        PHI = 2 * cp.real(cp.multiply(cp.hstack([cp.multiply(self.G_freq, ZFx), ZFy]), np.conj(Pc))) @ XY_n - np.abs(
-            Pc) ** 2
-        CON = self.rcone(PHI, gam_2, F_a)
-
-        if self.high_freq_u_lim:
-            CON += self.rcone(PHI, gam_inf, F_b)
-            CON += [cp.sum(cp.multiply(integ[:, np.newaxis], gam_2)) <= obj_2, obj_2 >= 0, gam_inf >= 0]
-        else:
-            CON += [cp.sum(cp.multiply(integ[:, np.newaxis], gam_2)) <= obj_2, obj_2 >= 0]
-
-        CON += self.robust_nyquist(P, Pc)
-        CON += self.con_radius(z_, szy, Y_c, Y_n)
-
-        if self.high_freq_u_lim:
-            prob = cp.Problem(cp.Minimize(obj_2 + obj_inf), CON)
-        else:
-            prob = cp.Problem(cp.Minimize(obj_2), CON)
         try:
-            prob.solve(solver=cp.CLARABEL, verbose=False, tol_gap_abs=1e-7, tol_gap_rel=1e-7, tol_feas=1e-7)
+            self.prob.solve(solver=cp.CLARABEL, verbose=False, tol_gap_abs=1e-7, tol_gap_rel=1e-7, tol_feas=1e-7, warm_start=True)
         except cp.error.SolverError as e:
             print("Solver failed:", e)
             return -1
 
 
-        if isinstance(Y_n, np.ndarray):  # happens if controller order is 1
-            K_temp,_,_ = self.get_K(X_n.value,Y_n)
+        if isinstance(self.Y_n, np.ndarray):  # happens if controller order is 1
+            K_temp,_,_ = self.get_K(self.X_n.value,self.Y_n)
         else:
-            K_temp,_,_ = self.get_K(X_n.value,Y_n.value)
+            K_temp,_,_ = self.get_K(self.X_n.value,self.Y_n.value)
 
         stable = self.check_nyquist_stability(K_temp)
         if not stable:
             print("Controller unstable stopping iterations")
             return -1
         if verbose:
-            print('obj = {:.2f}'.format(obj_2.value[0]))
+            print('obj = {:.2f}'.format(self.obj_2.value[0]))
             if self.high_freq_u_lim:
-                print('obj_inf = {:.5f}'.format(obj_inf.value[0][0]))
+                print('obj_inf = {:.5f}'.format(self.obj_inf.value[0][0]))
 
-        self.num = X_n.value
-        if isinstance(Y_n, np.ndarray):  # happens if controller order is 1
-            self.den = Y_n
-        else:
-            self.den = Y_n.value
-        return obj_2.value[0]
+        self.num = self.X_n.value
+        self.den = self.Y_n if isinstance(self.Y_n, np.ndarray) else self.Y_n.value
+
+        # roll new controller into "current" parameters for the next iteration
+        self.X_c.value = self.num
+        self.Y_c.value = self.den
+
+        return self.obj_2.value[0]
 
     def compute_controller(self, verbose=False):
         t_start = time.perf_counter()
+        self.build_problem()
         for i in range(self.n_iter):
             # print(i)
             obj = self.solve_iter(verbose)
