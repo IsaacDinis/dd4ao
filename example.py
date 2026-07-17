@@ -14,7 +14,8 @@ import numpy as np
 import control as ct
 from matplotlib import pyplot as plt
 
-import dd4ao
+# import dd4ao
+import dd4ao_ddp as dd4ao
 from dd_utils import *  # compute_fft_mag_welch, G_tf, freqresp, check_K_stability,
                          # evaluate_K_performance, theoretical_best_perf, plot_combined
 
@@ -55,7 +56,7 @@ G_resp = freqresp(G, w)
 # Design the DD4AO (data-driven) controller
 # -----------------------------------------------------------------------
 dd = dd4ao.DD4AO(w, G_resp, dist_fft, order, fs)
-dd.compute_controller(verbose=True)
+dd.compute_controller(verbose=False)
 K = dd.K
 
 # --- Stability check: eigenvalue of the closed loop + margins ---
